@@ -1,11 +1,11 @@
 package com.freyr.apollo18.commands;
 
 import com.freyr.apollo18.Apollo18;
+import com.freyr.apollo18.commands.business.BusinessCommand;
+import com.freyr.apollo18.commands.business.WorkCommand;
 import com.freyr.apollo18.commands.casino.CoinFlipGame;
 import com.freyr.apollo18.commands.casino.SlotMachineCommands;
-import com.freyr.apollo18.commands.dev.CreateGuild;
-import com.freyr.apollo18.commands.dev.CreateProfile;
-import com.freyr.apollo18.commands.dev.CreateUser;
+import com.freyr.apollo18.commands.dev.*;
 import com.freyr.apollo18.commands.economy.*;
 import com.freyr.apollo18.commands.fun.*;
 import com.freyr.apollo18.commands.information.*;
@@ -13,6 +13,7 @@ import com.freyr.apollo18.commands.leveling.LeaderboardCommand;
 import com.freyr.apollo18.commands.leveling.RankCommand;
 import com.freyr.apollo18.commands.music.*;
 import com.freyr.apollo18.commands.settings.LevelingSettings;
+import com.freyr.apollo18.commands.settings.NotificationSettings;
 import com.freyr.apollo18.commands.settings.WelcomeSettings;
 import com.freyr.apollo18.commands.utility.*;
 import com.freyr.apollo18.util.embeds.EmbedUtils;
@@ -71,16 +72,19 @@ public class CommandManager extends ListenerAdapter {
                 new RankCommand(bot), new LeaderboardCommand(bot),
 
                 // Economy Commands
-                new BalanceCommand(bot), new DepositCommand(bot), new WithdrawCommand(bot), new BegCommand(bot), new DailyCommand(bot), new RobCommand(bot),
+                new BalanceCommand(bot), new DepositCommand(bot), new WithdrawCommand(bot), new BegCommand(bot), new DailyCommand(bot), new RobCommand(bot), new PayCommand(bot),
 
                 // Casino Commands
                 new CoinFlipGame(bot), new SlotMachineCommands(bot),
 
+                // Business Commands
+                new BusinessCommand(bot), new WorkCommand(bot),
+
                 // Settings Commands
-                new WelcomeSettings(bot), new LevelingSettings(bot),
+                new WelcomeSettings(bot), new LevelingSettings(bot), new NotificationSettings(bot),
 
                 // Dev only
-                new CreateProfile(bot), new CreateUser(bot), new CreateGuild(bot),
+                new CreateProfile(bot), new CreateUser(bot), new CreateGuild(bot), new CreateDefaultBusiness(bot), new DailyTasks(bot), new CreateDefaultJob(bot),
 
                 // Help command should come at the bottom
                 new HelpCommand(bot));

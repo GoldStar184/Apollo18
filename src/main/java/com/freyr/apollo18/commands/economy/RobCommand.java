@@ -61,6 +61,9 @@ public class RobCommand extends Command {
             String randomResponse = successResponses.getString((int) (Math.random() * successResponses.length())).replace("[member]", event.getUser().getName());
             int bytesStolen = (int) (Math.random() * (12 - 5) + 1) + 5;
 
+            int robberOldBytes = db.getBalance(event.getUser().getId());
+            int victimOldBytes = db.getBalance(victim.getId());
+
             db.addBytes(event.getUser().getId(), bytesStolen);
             db.removeBytes(victim.getId(), bytesStolen);
 
@@ -70,6 +73,13 @@ public class RobCommand extends Command {
             embed.setColor(EmbedColor.DEFAULT_COLOR);
 
             event.getHook().sendMessageEmbeds(embed.build()).queue();
+
+            if (db.getNotificationToggle(victim.getId())) {
+                event.getJDA().getUserById(victim.getId()).openPrivateChannel().flatMap(channel -> channel.sendMessageEmbeds(EmbedUtils.createNotification(event.getUser().getName() + " has just robbed <:byte:858172448900644874> " + bytesStolen + " bytes from you!"))).queue();
+            }
+
+            db.createTransaction(event.getUser().getId(), "Robbery / Robber", robberOldBytes, db.getBalance(event.getUser().getId()));
+            db.createTransaction(victim.getId(), "Robbery / Victim", victimOldBytes, db.getBalance(victim.getId()));
         } else {
             String randomResponse = failResponses.getString((int) (Math.random() * failResponses.length())).replace("[member]", event.getUser().getName());
 

@@ -40,10 +40,13 @@ public class CoinFlipGame extends Command {
 
         if (bet > db.getBalance(event.getUser().getId())) {
             event.getHook().sendMessageEmbeds(EmbedUtils.createError("You do not have enough money in your wallet")).queue();
+            return;
         }
 
         boolean flip = rd.nextBoolean();
         boolean choice = event.getOption("guess").getAsString().equals("heads");
+
+        int oldBal = db.getBalance(event.getUser().getId());
 
         if (choice == flip) {
             db.addBytes(event.getUser().getId(), bet);
@@ -66,5 +69,7 @@ public class CoinFlipGame extends Command {
 
             event.getHook().sendMessageEmbeds(embed.build()).queue();
         }
+
+        db.createTransaction(event.getUser().getId(), "Casino / Coin-flip", oldBal, db.getBalance(event.getUser().getId()));
     }
 }

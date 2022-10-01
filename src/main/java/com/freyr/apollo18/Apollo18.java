@@ -18,6 +18,10 @@ import net.dv8tion.jda.api.utils.cache.CacheFlag;
 import org.jetbrains.annotations.NotNull;
 
 import javax.security.auth.login.LoginException;
+import java.time.Duration;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -35,7 +39,7 @@ public class Apollo18 {
 
     public Apollo18() throws LoginException {
         config = Dotenv.configure().ignoreIfMissing().load(); // Initializing and loading the .env file if it exists in the classpath.
-        database = new Database(config.get("DATABASE", System.getenv("DATABASE")));
+        database = new Database(config.get("DATABASE", System.getenv("DATABASE")), this);
 
         DefaultShardManagerBuilder builder = DefaultShardManagerBuilder.createDefault(config.get("TOKEN", System.getenv("TOKEN"))); // Creating a basic instance of the bot and logging in with token
         builder.setStatus(OnlineStatus.ONLINE); // Setting the bot status to ONLINE (Green Dot)
@@ -51,6 +55,25 @@ public class Apollo18 {
 
         // Registering Listeners
         shardManager.addEventListener(new GuildListener(this), new ButtonListener(), new LevelingListener(this), new CommandManager(this), new BotListener(this));
+
+        ZonedDateTime now = ZonedDateTime.now(ZoneId.of("America/Los_Angeles"));
+        ZonedDateTime nextRun = now.withHour(1).withMinute(0).withSecond(0);
+        if(now.compareTo(nextRun) > 0) {
+            nextRun = nextRun.plusDays(1);
+        }
+
+        Duration duration = Duration.between(now, nextRun);
+        long initialDelay = duration.getSeconds();
+        System.out.println("Will run in: " + initialDelay);
+
+        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        scheduler.scheduleAtFixedRate(() -> {
+            System.out.println("Running");
+            database.updateStocks();
+            database.dailyWorkChecks();
+        }, initialDelay, TimeUnit.DAYS.toSeconds(1), TimeUnit.SECONDS);
+
+        System.out.println("Will run at " + nextRun.format(DateTimeFormatter.ofPattern("yyyy/MM/dd-hh:mm:ss")));
     }
 
     public static void main(String[] args) {

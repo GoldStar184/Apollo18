@@ -1,6 +1,8 @@
 package com.freyr.apollo18.data;
 
-import com.mongodb.BasicDBObject;
+import com.freyr.apollo18.Apollo18;
+import com.freyr.apollo18.handlers.BusinessHandler;
+import com.freyr.apollo18.util.textFormatters.RandomString;
 import com.mongodb.MongoClient;
 import com.mongodb.MongoClientURI;
 import com.mongodb.MongoException;
@@ -9,12 +11,20 @@ import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.*;
+import com.mongodb.lang.Nullable;
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack;
 import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.User;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.json.JSONObject;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -27,20 +37,27 @@ import java.util.List;
  */
 public class Database {
 
+    private final Apollo18 bot;
+
     private final MongoCollection<Document> guildData; // The collection of documents for guilds
     private final MongoCollection<Document> userData; // The collection of documents for users
+    private final MongoCollection<Document> businessData;
+    private final MongoCollection<Document> transactionData;
 
     /**
      * Creates a connection to the database and the collections
      *
      * @param srv The connection string
      */
-    public Database(String srv) {
+    public Database(String srv, Apollo18 bot) {
+        this.bot = bot;
         MongoClient mongoClient = new MongoClient(new MongoClientURI(srv));
         MongoDatabase database = mongoClient.getDatabase("apollo");
 
         guildData = database.getCollection("guildData");
         userData = database.getCollection("userData");
+        businessData = database.getCollection("businesses");
+        transactionData = database.getCollection("transactions");
     }
 
     public void createGuildData(Guild guild) {
@@ -62,10 +79,10 @@ public class Database {
         List<Document> items = new ArrayList<>();
         List<Document> playlists = new ArrayList<>();
 
-        Document economyData = new Document("balance", 0).append("bank", 0).append("job", new Document("business", null).append("job", null)).append("card", new Document("debit-card", false).append("credit-card", new Document("hasCard", false).append("currentBalance", 0).append("totalBalance", 0).append("expirationDate", null))).append("items", items);
+        Document economyData = new Document("balance", 0).append("bank", 0).append("job", new Document("business", null).append("job", null).append("daysWorked", 0).append("daysMissed", 0).append("worked", false)).append("card", new Document("debit-card", false).append("credit-card", new Document("hasCard", false).append("currentBalance", 0).append("totalBalance", 0).append("expirationDate", null))).append("items", items);
         Document musicData = new Document("playlists", playlists);
 
-        userData.insertOne(new Document("userID", user.getId()).append("leveling", xp).append("economy", economyData).append("music", musicData));
+        userData.insertOne(new Document("userID", user.getId()).append("notifications", true).append("leveling", xp).append("economy", economyData).append("music", musicData));
 
         return true;
     }
@@ -356,10 +373,13 @@ public class Database {
 
         Bson update = Updates.combine(Updates.inc("leveling.$[ele].level", 1), Updates.set("leveling.$[ele].xp", 0));
 
+        int oldBal = getBalance(userId);
+
         addBytes(userId, bytesAdded);
 
         try {
             userData.updateOne(filter, update, options);
+            createTransaction(userId, "Leveling / Level-up", oldBal, getBalance(userId));
         } catch (MongoException me) {
             me.printStackTrace();
         }
@@ -375,6 +395,7 @@ public class Database {
     public Document getEconomyUser(String userId) {
         return userData.find(new Document("userID", userId)).first().get("economy", Document.class);
     }
+
     public int getBalance(String userId) {
         return userData.find(new Document("userID", userId)).first().get("economy", Document.class).getInteger("balance");
     }
@@ -433,8 +454,19 @@ public class Database {
     }
 
     public AggregateIterable<Document> getEconomyLeaderboard(String guildId, int limit) {
-        return userData.aggregate(Arrays.asList(Aggregates.match(Filters.and(Filters.eq("leveling.guildID", guildId), Filters.eq("leveling.inServer", true))), Aggregates.addFields(new Field("sum", Filters.eq("$add", Arrays.asList("$balance", "$bank")))), Aggregates.sort(Sorts.descending("sum")), Aggregates.limit(limit)));
+        return userData.aggregate(Arrays.asList(Aggregates.match(Filters.and(Filters.eq("leveling.guildID", guildId), Filters.eq("leveling.inServer", true))), Aggregates.addFields(new Field("sum", Filters.eq("$add", Arrays.asList("balance", "$bank")))), Aggregates.sort(Sorts.descending("sum"))));
     }
+    // endregion
+
+    // Transactions
+    // region
+
+    public void createTransaction(String userId, String transactionType, int oldBal, int newBal) {
+        Document transaction = new Document("userID", userId).append("byteExchange", (newBal - oldBal)).append("previousBal", oldBal).append("newBal", newBal).append("transactionType", transactionType).append("transactionDate", DateTimeFormatter.ofPattern("yyyy/MM/dd-HH:mm:ss").format(LocalDateTime.now()));
+
+        transactionData.insertOne(transaction);
+    }
+
     // endregion
 
     // Music
@@ -539,5 +571,304 @@ public class Database {
         return userData.find(new Document("userID", userId).append("music.playlists.playlistName", playlist).append("music.playlists.songs.songName", songName)).first() != null;
     }
 
+    // endregion
+
+    // Businesses
+    // region
+    public void createDefaultBusiness(String businessName, String businessDescription, String ticker, String stockCode, @Nullable String logo) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder().uri(URI.create("https://twelve-data1.p.rapidapi.com/quote?symbol=" + ticker + "&interval=1day&outputsize=30&format=json")).header("X-RapidAPI-Key", bot.getConfig().get("RAPIDAPI_KEY", System.getenv("RAPIDAPI_KEY"))).header("X-RapidAPI-Host", "twelve-data1.p.rapidapi.com").method("GET", HttpRequest.BodyPublishers.noBody()).build();
+            HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+            JSONObject data = new JSONObject(response.body());
+
+            int change = (int) Double.parseDouble(data.getString("change"));
+            int currentPrice = (int) Double.parseDouble(data.getString("close")) / 4;
+            int previousPrice = currentPrice - change;
+
+            Document stockData = new Document("ticker", ticker).append("currentPrice", currentPrice).append("previousPrice", previousPrice).append("change", change).append("arrowEmoji", BusinessHandler.getArrow(change));
+            Document document = new Document("name", businessName).append("stockCode", stockCode).append("owner", "default").append("description", businessDescription).append("logo", (logo == null) ? "https://library.kissclipart.com/20181224/fww/kissclipart-free-vector-building-clipart-computer-icons-66d576fc7c1dd7ff.png" : logo).append("public", true).append("jobs", new ArrayList<Document>()).append("stock", stockData);
+
+            businessData.insertOne(document);
+        } catch (Exception e) {
+            System.err.println(e);
+        }
+    }
+
+    public Document getBusiness(String stockCode) {
+        return businessData.find(new Document("stockCode", stockCode)).first();
+    }
+
+    public List<Document> getBusinesses() {
+        List<Document> result = new ArrayList<>();
+
+        FindIterable<Document> businesses = businessData.find(new Document("public", true));
+        for (Document business : businesses) {
+            result.add(business);
+        }
+
+        return result;
+    }
+
+    public void addStockToUser(Document business, String userId, int quantity) {
+        Document userBusiness = new Document("_id", new RandomString(12).nextString()).append("stockCode", business.getString("stockCode")).append("purchasePrice", business.get("stock", Document.class).getInteger("currentPrice")).append("quantity", quantity);
+        Document query = new Document("userID", userId);
+
+        Bson updates = Updates.push("economy.stocks", userBusiness);
+
+        UpdateOptions options = new UpdateOptions().upsert(true);
+
+        int oldBal = getBalance(userId);
+
+        userData.updateOne(query, updates, options);
+        removeBytes(userId, business.get("stock", Document.class).getInteger("currentPrice") * quantity);
+
+        createTransaction(userId, "Business / Stock / Buy", oldBal, getBalance(userId));
+    }
+
+    public void removeStockFromUser(String userId, String stockCode, int quantity) {
+        List<Document> actions = getPurchasedStocks(userId, stockCode, quantity);
+        Document business = getBusiness(stockCode);
+        int currentPrice = business.get("stock", Document.class).getInteger("currentPrice");
+
+        int totalPrice = quantity * currentPrice;
+
+        for (int i = 0; i < actions.size(); i++) {
+            if (actions.get(i).getInteger("action") == 0) {
+                Document updates = new Document("$pull", new Document("economy.stocks", new Document("_id", actions.get(i).getString("_id"))));
+
+                userData.updateOne(new Document("userID", userId), updates, new UpdateOptions().upsert(true));
+            } else {
+                UpdateOptions options = new UpdateOptions().arrayFilters(List.of(Filters.eq("ele._id", actions.get(i).getString("_id"))));
+                Bson updates = Updates.set("economy.stocks.$[ele].quantity", actions.get(i).getInteger("quantity"));
+
+                userData.updateOne(new Document("userID", userId), updates, options);
+            }
+        }
+
+        addBytes(userId, totalPrice);
+        createTransaction(userId, "Business / Stock / Sell", getBalance(userId) - totalPrice, getBalance(userId));
+    }
+
+    private List<Document> getPurchasedStocks(String userId, String stockCode, int quantity) {
+        List<Document> result = new ArrayList<>();
+
+        Document userDoc = userData.find(new Document("userID", userId)).first();
+        List<Document> stocks = userDoc.get("economy", Document.class).getList("stocks", Document.class);
+        int tempQuantity = quantity;
+
+        System.out.println("Info: Building Document for Stock: " + stockCode + ", Quantity: " + tempQuantity);
+
+        for (int i = 0; i < stocks.size(); i++) {
+            if (stocks.get(i).getString("stockCode").equals(stockCode.toUpperCase()) && tempQuantity > 0) {
+                if (stocks.get(i).getInteger("quantity") <= tempQuantity && (tempQuantity - stocks.get(i).getInteger("quantity")) >= 0) {
+                    tempQuantity -= stocks.get(i).getInteger("quantity");
+                    System.out.println("Info: Action: Delete | SQ: " + stocks.get(i).getInteger("quantity") + " | TQ Left: " + tempQuantity);
+                    result.add(new Document("_id", stocks.get(i).getString("_id")).append("quantity", stocks.get(i).getInteger("quantity")).append("index", i).append("action", 0));
+                } else if (stocks.get(i).getInteger("quantity") > tempQuantity) {
+                    System.out.println("Info: Action: Update | SQ from: " + stocks.get(i).getInteger("quantity") + " to: " + (stocks.get(i).getInteger("quantity") - tempQuantity));
+                    result.add(new Document("_id", stocks.get(i).getString("_id")).append("quantity", (stocks.get(i).getInteger("quantity") - tempQuantity)).append("index", i).append("action", 1));
+                    tempQuantity -= tempQuantity;
+                    System.out.println("Info: TQ Left: " + tempQuantity);
+                }
+            }
+        }
+
+        System.out.println(result);
+        return result;
+    }
+
+    public int getTotalStocks(String userId, String stockCode) {
+        try {
+            List<Document> purchasedStocks = userData.find(new Document("userID", userId)).first().get("economy", Document.class).getList("stocks", Document.class);
+            int totalStocks = 0;
+            for (Document purchasedStock : purchasedStocks) {
+                if (purchasedStock.getString("stockCode").equals(stockCode)) {
+                    totalStocks += purchasedStock.getInteger("quantity");
+                }
+            }
+
+            return totalStocks;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    public void updateStocks() {
+        FindIterable<Document> businesses = businessData.find();
+
+        for (Document business : businesses) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder().uri(URI.create("https://twelve-data1.p.rapidapi.com/quote?symbol=" + business.get("stock", Document.class).getString("ticker") + "&interval=1day&outputsize=30&format=json")).header("X-RapidAPI-Key", bot.getConfig().get("RAPIDAPI_KEY", System.getenv("RAPIDAPI_KEY"))).header("X-RapidAPI-Host", "twelve-data1.p.rapidapi.com").method("GET", HttpRequest.BodyPublishers.noBody()).build();
+                HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+                JSONObject data = new JSONObject(response.body());
+
+                int change = (int) Double.parseDouble(data.getString("change"));
+                int currentPrice = (int) Double.parseDouble(data.getString("close")) / 4;
+                int previousPrice = currentPrice - change;
+
+                Bson updates = Updates.combine(
+                        Updates.set("stock.currentPrice", currentPrice),
+                        Updates.set("stock.previousPrice", previousPrice),
+                        Updates.set("stock.change", change),
+                        Updates.set("stock.arrowEmoji", BusinessHandler.getArrow(change))
+                );
+
+                businessData.updateOne(business, updates, new UpdateOptions().upsert(true));
+                createTransaction("stockUpdate", "Business / Stock / Update", previousPrice, currentPrice);
+                System.out.println("Updating " + business.get("stock", Document.class).getString("ticker") + "; Old Price: " + previousPrice + "; Current Price: " + currentPrice + "; Change: " + change + "\nAll Details: " + data);
+            } catch (Exception e) {
+                System.err.println(e);
+            }
+        }
+    }
+
+    // Jobs
+    // region
+
+    public void createDefaultJob(String code, String jobName, String jobDescription, int salary, int daysBeforeFire) {
+        Document query = new Document("stockCode", code);
+        Document job = new Document("name", jobName).append("description", jobDescription).append("salary", salary).append("daysBeforeFire", daysBeforeFire).append("available", true);
+
+        Bson updates = Updates.push("jobs", job);
+
+        businessData.updateOne(query, updates, new UpdateOptions().upsert(true));
+    }
+
+    public List<Document> getJobs(String code) {
+        return businessData.find(new Document("stockCode", code)).first().getList("jobs", Document.class);
+    }
+
+    public Document getJob(String code, String jobName) {
+        Document business = businessData.find(new Document("stockCode", code)).first();
+        if (business == null) return null;
+        Document job = null;
+        for (Document doc : business.getList("jobs", Document.class)) {
+            if (doc.getString("name").equalsIgnoreCase(jobName)) {
+                job = doc;
+                break;
+            }
+        }
+
+        return job;
+    }
+
+    public boolean work(String userId) {
+        Document userEconomyDoc = userData.find(new Document("userID", userId)).first().get("economy", Document.class);
+        Document userJob = getJob(userEconomyDoc.get("job", Document.class).getString("business"), userEconomyDoc.get("job", Document.class).getString("job"));
+        if (userJob == null) return false;
+
+        addBytes(userId, userJob.getInteger("salary"));
+        Document query = new Document("userID", userId);
+
+        if (userEconomyDoc.get("job", Document.class).getInteger("daysMissed") == null) {
+            Document job = new Document("business", userEconomyDoc.get("job", Document.class).getString("business")).append("job", userEconomyDoc.get("job", Document.class).getString("job")).append("daysWorked", 1).append("daysMissed", 0).append("worked", true);
+
+            Bson updates = Updates.set("economy.job", job);
+
+            userData.updateOne(new Document("userID", userId), updates, new UpdateOptions().upsert(true));
+            return true;
+        }
+
+        if (!userEconomyDoc.get("job", Document.class).getBoolean("worked")) {
+            Bson updates = Updates.combine(
+                    Updates.inc("economy.job.daysWorked", 1),
+                    Updates.set("economy.job.worked", true)
+            );
+
+            userData.updateOne(query, updates, new UpdateOptions().upsert(true));
+            createTransaction(userId, "Job / Work", getBalance(userId) - userJob.getInteger("salary"), getBalance(userId));
+        }
+        return true;
+    }
+
+    public void setJob(String userId, String code, String jobName) {
+        Document query = new Document("userID", userId);
+        Document job = getJob(code, jobName);
+
+        Bson updates = Updates.combine(
+                Updates.set("economy.job.business", code),
+                Updates.set("economy.job.job", job.getString("name"))
+        );
+
+        userData.updateOne(query, updates, new UpdateOptions().upsert(true));
+    }
+
+    public Document getUserJob(String userId) {
+        return userData.find(new Document("userID", userId)).first().get("economy", Document.class).get("job", Document.class);
+    }
+
+    // endregion
+
+    public void dailyWorkChecks() {
+        for (Document user : userData.find(new Document())) {
+            Document query = new Document("userID", user.getString("userID"));
+            System.out.println("Updating data for " + user.getString("userID"));
+            if (user.get("economy", Document.class).get("job", Document.class).getInteger("daysMissed") == null
+                    || user.get("economy", Document.class).get("job", Document.class).getBoolean("worked") == null) {
+                Document job = new Document("business", null).append("job", null).append("daysWorked", 0).append("daysMissed", 0).append("worked", false);
+                Bson updates = Updates.set("economy.job", job);
+
+                userData.updateOne(query, updates, new UpdateOptions().upsert(true));
+                System.out.println("Replaced Job Data with Updated Job Data for " + user.getString("userID"));
+            }
+
+            if (!user.get("economy", Document.class).get("job", Document.class).getBoolean("worked") && user.get("economy", Document.class).get("job", Document.class).getString("job") != null) {
+                Bson updates = Updates.combine(
+                        Updates.set("economy.job.daysWorked", 0),
+                        Updates.inc("economy.job.daysMissed", 1)
+                );
+
+                userData.updateOne(query, updates, new UpdateOptions().upsert(true));
+                System.out.println(user.getString("userID") + " did not work today. Days missed added");
+            }
+
+            if (getJob(user.get("economy", Document.class).get("job", Document.class).getString("business"), user.get("economy", Document.class).get("job", Document.class).getString("job")) == null) {
+                continue;
+            }
+
+            if (user.get("economy", Document.class).get("job", Document.class).getInteger("daysMissed") > getJob(user.get("economy", Document.class).get("job", Document.class).getString("business"), user.get("economy", Document.class).get("job", Document.class).getString("job")).getInteger("daysBeforeFire")) {
+                Bson updates = Updates.combine(
+                        Updates.set("economy.job.business", null),
+                        Updates.set("economy.job.job", null),
+                        Updates.set("economy.job.daysMissed", 0)
+                );
+
+                userData.updateOne(query, updates, new UpdateOptions().upsert(true));
+                removeBytes(user.getString("userID"), getJob(user.get("economy", Document.class).get("job", Document.class).getString("business"), user.get("economy", Document.class).get("job", Document.class).getString("job")).getInteger("salary") * 5);
+                System.out.println(user.getString("userID") + " was fired");
+            }
+
+            Bson updates = Updates.set("economy.job.worked", false);
+            userData.updateOne(query, updates, new UpdateOptions().upsert(true));
+        }
+    }
+    // endregion
+
+    // Notifications
+    // region
+    public boolean getNotificationToggle(String userId) {
+        try {
+            return userData.find(new Document("userID", userId)).first().getBoolean("notifications");
+        } catch (NullPointerException ne) {
+            userData.updateOne(new Document("userID", userId), Updates.set("notifications", true), new UpdateOptions().upsert(true));
+            return userData.find(new Document("userID", userId)).first().getBoolean("notifications");
+        }
+    }
+
+    public void toggleNotifications(String userId) {
+        Document query = new Document("userID", userId);
+        UpdateOptions options = new UpdateOptions().upsert(true);
+
+        try {
+            Bson updates = Updates.set("notifications", !getNotificationToggle(userId));
+            try {
+                userData.updateOne(query, updates, options);
+            } catch (MongoException me) {
+                me.printStackTrace();
+            }
+        } catch (NullPointerException ne) {
+            userData.updateOne(query, Updates.set("notifications", false), options);
+        }
+    }
     // endregion
 }
